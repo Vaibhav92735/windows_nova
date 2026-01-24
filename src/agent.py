@@ -1,21 +1,17 @@
+from typing import List
 import os
 import time
 import subprocess
-import pyautogui
-import pygetwindow
+import shutil
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
+from langchain_ollama import ChatOllama
+from langchain.messages import AIMessage
 
 load_dotenv()
 
-import os
-import shutil
-import winreg
-
 def get_app_registry():
-    # 1. Apps we expect to find in the System PATH (like notepad, calc)
     common_tools = ["notepad", "calc", "mspaint", "cmd", "powershell", "code", "chrome"]
     registry = {}
 
@@ -24,143 +20,139 @@ def get_app_registry():
         if path:
             registry[app] = path
 
-    # 2. Hardcoded common paths for apps not usually in PATH (like Office)
     potential_paths = {
         "excel": r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
         "word": r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
         "chrome_alt": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "vscode_user": os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Microsoft VS Code\Code.exe")
+        "vscode_user": os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\Microsoft VS Code\Code.exe"),
     }
 
     for name, path in potential_paths.items():
-        if os.path.exists(path):
+        if path and os.path.exists(path):
             registry[name] = path
 
     return registry
 
-# Generate the map
 app_map = get_app_registry()
-print(f"Mapped {len(app_map)} applications.")
+print(f"Mapped {len(app_map)} applications: {list(app_map.keys())}")
 
-
-# --- 1. Define Intelligent Tools ---
-
-# @tool
-# def open_app(app_name: str):
-#     """Launch an application. Try short names like 'code' or 'notepad'."""
-#     import subprocess
-#     try:
-#         # shell=True allows Windows to resolve 'code' to the VS Code path
-#         subprocess.Popen(app_name, shell=True)
-#         time.sleep(3) 
-#         return f"App {app_name} opened."
-#     except Exception as e:
-#         return f"Failed: {str(e)}"
+# -------------------------
+# Tools
+# -------------------------
 
 @tool
-def open_app(app_identifier: str):
-    """
-    Launch an application. 
-    app_identifier can be a full path or a common name found in your registry.
-    """
-    # Check if Gemini sent a nickname that exists in our map
+def open_app(app_identifier: str) -> str:
+    """Launch an application. Use either a known nickname (from the registry) or a full path."""
     target_path = app_map.get(app_identifier.lower(), app_identifier)
-    
     try:
-        # Use 'start' to handle both paths and aliases correctly
+        # Use start so that files/paths with spaces open correctly on Windows
         subprocess.Popen(f'start "" "{target_path}"', shell=True)
-        time.sleep(3)
+        time.sleep(1.5)
         return f"Successfully opened {app_identifier} using path: {target_path}"
     except Exception as e:
-        return f"Failed to open {app_identifier}: {str(e)}"
+        return f"Failed to open {app_identifier}: {e}"
 
 @tool
-def maximize_app(window_title: str):
-    """Maximizes a window. Use 'Visual Studio Code' or 'Notepad'."""
-    # Retry loop because apps take time to appear
-    for _ in range(5): 
+def maximize_app(window_title: str) -> str:
+    """Maximizes a window matching `window_title` (substring match)."""
+    try:
+        import pygetwindow
+    except Exception as e:
+        return f"pygetwindow not available: {e}"
+
+    for _ in range(6):
         wins = pygetwindow.getWindowsWithTitle(window_title)
         if wins:
             win = wins[0]
-            if win.isMinimized: win.restore()
-            win.maximize()
-            win.activate()
-            return f"Window '{window_title}' maximized."
-        time.sleep(1)
+            try:
+                # safe attribute access
+                if getattr(win, "isMinimized", False):
+                    win.restore()
+                win.maximize()
+                win.activate()
+                return f"Window '{window_title}' maximized."
+            except Exception as e:
+                return f"Failed to maximize '{window_title}': {e}"
+        time.sleep(0.8)
     return f"Timeout: Could not find window '{window_title}'."
 
 @tool
-def type_text(text: str):
-    """Types the provided text into the currently active window."""
+def type_text(text: str) -> str:
+    """Types the provided text into the active window using pyautogui."""
+    try:
+        import pyautogui
+    except Exception as e:
+        return f"pyautogui not available: {e}"
     pyautogui.write(text, interval=0.03)
     return f"Successfully typed: {text}"
 
 @tool
-def press_hotkey(keys: list[str]):
-    """
-    Presses a combination of keys (hotkey). 
-    Input should be a list of strings, e.g., ['ctrl', 's'] or ['enter'].
-    """
+def press_hotkey(keys: List[str]) -> str:
+    """Presses keys (list) as a hotkey using pyautogui.hotkey."""
+    try:
+        import pyautogui
+    except Exception as e:
+        return f"pyautogui not available: {e}"
     pyautogui.hotkey(*keys)
     return f"Pressed hotkey: {', '.join(keys)}"
 
-# --- 2. Setup Agent ---
+@tool
+def validate_user(user_id: int, addresses: List[str]) -> bool:
+    """Validate user using historical addresses."""
+    # implement your actual validation here
+    return True
 
-tools = [open_app, maximize_app, type_text, press_hotkey]
-tools_map = {tool.name: tool for tool in tools}
+# -------------------------
+# Bind tools (pass callables, not StructuredTool objects)
+# -------------------------
+# If you used @tool above, those names are Tool/StructuredTool objects.
+# Pass the underlying function (.func) or the plain callable to bind_tools.
+llm = ChatOllama(
+    model="qwen3:4b",
+    validate_model_on_init=True,
+    temperature=0,
+).bind_tools([
+    open_app.func,
+    maximize_app.func,
+    type_text.func,
+    press_hotkey.func,
+    validate_user.func,
+])
 
-# Note: Using gemini-1.5-flash as it is the current stable high-speed model
-model = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", 
-    api_key=os.getenv("GOOGLE_API_KEY"),
-    temperature=0.7 # Slight temperature allows for more creative decision making
-)
-model_with_tools = model.bind_tools(tools)
+# Example invoke (your model might expect message objects; adjust if needed)
+result = llm.invoke("Open notepad, maximize it and type write a code to add two numbers.")
 
-# --- 3. The Execution Loop (The "Brain") ---
+# Robust printing of tool calls (different versions may return different types)
+if hasattr(result, "tool_calls") and result.tool_calls:
+    print("Tool calls:", result.tool_calls)
+else:
+    # Fall back to printing the raw result
+    print("Result:", result)
 
+TOOL_REGISTRY = {
+    "open_app": open_app.func,
+    "maximize_app": maximize_app.func,
+    "type_text": type_text.func,
+    "press_hotkey": press_hotkey.func,
+    "validate_user": validate_user.func,
+}
 
+if isinstance(result, AIMessage) and result.tool_calls:
+    for call in result.tool_calls:
+        tool_name = call["name"]
+        tool_args = call["args"]
 
-def run_automation_agent(user_prompt: str):
-    app_context = "\n".join([f"- {name}: {path}" for name, path in app_map.items()])
+        print(f"\n→ Executing tool: {tool_name}")
+        print(f"  Args: {tool_args}")
 
-    system_prompt = f"""
-    You are a Windows Automation Assistant. 
-    You have access to the following application paths on this computer:
-    {app_context}
+        tool_fn = TOOL_REGISTRY.get(tool_name)
 
-    When using the 'open_app' tool, always prefer the full path provided above.
-    """
-    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-    
-    print(f"🤖 User Request: {user_prompt}\n" + "-"*30)
+        if not tool_fn:
+            print(f"  ❌ Tool '{tool_name}' not found")
+            continue
 
-    while True:
-        # Ask Gemini what to do
-        ai_msg = model_with_tools.invoke(messages)
-        messages.append(ai_msg)
-
-        # If Gemini provides a text response without tool calls, we are finished
-        if not ai_msg.tool_calls:
-            print(f"\n✅ Gemini's Summary: {ai_msg.content}")
-            break
-
-        # Execute the tools Gemini decided to call
-        for tool_call in ai_msg.tool_calls:
-            name = tool_call["name"]
-            args = tool_call["args"]
-            
-            print(f"🛠️ Gemini decided to use: {name} with args: {args}")
-            
-            selected_tool = tools_map[name]
-            result = selected_tool.invoke(args)
-            
-            # Feed the result back to Gemini
-            messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
-
-# --- 4. Launch ---
-
-# Example prompt where Gemini decides the app and text
-prompt = "I need to get a list of the files and folders in the dir. Open cmd, make it big, and execute the command ls"
-
-run_automation_agent(prompt)
+        try:
+            output = tool_fn(**tool_args)
+            print(f"  ✅ Output: {output}")
+        except Exception as e:
+            print(f"  ❌ Tool execution failed: {e}")
