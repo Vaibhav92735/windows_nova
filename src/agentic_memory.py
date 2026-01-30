@@ -145,7 +145,6 @@ class MemoryService:
             print(f"Memory promoted to Qdrant: {summary[:30]}...")
 
     # --- 3. Retrieval (The Hybrid Algorithm) ---
-    # --- 3. Retrieval (Corrected for Qdrant v1.10+) ---
     def retrieve_context(self, user_id: str, session_id: str, query: str):
         """
         Performs the dual-stage retrieval using the Unified Query API.
@@ -153,7 +152,6 @@ class MemoryService:
         query_vector = self.embed_fn(query)
         
         # A. Session-Local Recall (Filter by current session_id)
-        # FIX: Used 'query_filter' instead of 'filter'
         session_response = self.qdrant.query_points(
             collection_name=QDRANT_COLLECTION,
             query=query_vector,
@@ -168,7 +166,6 @@ class MemoryService:
         session_hits = session_response.points
 
         # B. Cross-Session / Global Recall (Exclude current session, high importance)
-        # FIX: Used 'query_filter' instead of 'filter'
         global_response = self.qdrant.query_points(
             collection_name=QDRANT_COLLECTION,
             query=query_vector,
@@ -217,7 +214,7 @@ class MemoryService:
             {"session_id": session_id}
         ).sort("created_at", DESCENDING).limit(limit)
         
-        return list(cursor)[::-1] # Reverse to get chronological order
+        return list(cursor)[::-1]
     
     # --- 5. Maintenance / Cleanup ---
     def clear_memories(self, user_id: str = None):
@@ -281,12 +278,11 @@ SESSION_ID_B = "session_B" # Current session
 print("\n--- Simulating Session A (Old) ---")
 # User tells us a preference
 memory_service.add_message(USER_ID, SESSION_ID_A, "user", "I strictly code in Python, never Java.")
-# Agent (hypothetically) summarizes this and promotes it
 memory_service.promote_memory(
     user_id=USER_ID,
     session_id=SESSION_ID_A,
     summary="User prefers Python over Java for coding tasks.",
-    importance=0.9, # High importance preference
+    importance=0.9,
     m_type="preference"
 )
 
