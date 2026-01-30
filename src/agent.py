@@ -1,19 +1,24 @@
-from typing import List
+# task_runner.py
+from typing import List, Dict, Any, Optional
 import os
 import time
 import subprocess
 import shutil
 from dotenv import load_dotenv
 
+# Optional: langchain tool decorator for compatibility with your codebase
 from langchain.tools import tool
 from langchain_ollama import ChatOllama
 from langchain.messages import AIMessage
 
 load_dotenv()
 
-def get_app_registry():
+# -------------------------
+# Helper: app registry
+# -------------------------
+def get_app_registry() -> Dict[str, str]:
     common_tools = ["notepad", "calc", "mspaint", "cmd", "powershell", "code", "chrome"]
-    registry = {}
+    registry: Dict[str, str] = {}
 
     for app in common_tools:
         path = shutil.which(app)
@@ -34,15 +39,13 @@ def get_app_registry():
     return registry
 
 app_map = get_app_registry()
-print(f"Mapped {len(app_map)} applications: {list(app_map.keys())}")
 
 # -------------------------
-# Tools
+# Tools (same as your original ones)
 # -------------------------
-
 @tool
 def open_app(app_identifier: str) -> str:
-    """Launch an application. Use either a known nickname (from the registry) or a full path."""
+    """Open an application. Use either a known nickname (from the registry) or a full path."""
     target_path = app_map.get(app_identifier.lower(), app_identifier)
     try:
         # Use start so that files/paths with spaces open correctly on Windows
@@ -65,7 +68,6 @@ def maximize_app(window_title: str) -> str:
         if wins:
             win = wins[0]
             try:
-                # safe attribute access
                 if getattr(win, "isMinimized", False):
                     win.restore()
                 win.maximize()
@@ -93,66 +95,165 @@ def press_hotkey(keys: List[str]) -> str:
         import pyautogui
     except Exception as e:
         return f"pyautogui not available: {e}"
+    # pyautogui.hotkey accepts *args
     pyautogui.hotkey(*keys)
     return f"Pressed hotkey: {', '.join(keys)}"
 
 @tool
 def validate_user(user_id: int, addresses: List[str]) -> bool:
-    """Validate user using historical addresses."""
+    """Validate user using historical addresses. (Stub - replace with real logic.)"""
     # implement your actual validation here
     return True
 
-# -------------------------
-# Bind tools (pass callables, not StructuredTool objects)
-# -------------------------
-# If you used @tool above, those names are Tool/StructuredTool objects.
-# Pass the underlying function (.func) or the plain callable to bind_tools.
-llm = ChatOllama(
-    model="qwen3:4b",
-    validate_model_on_init=True,
-    temperature=0,
-).bind_tools([
-    open_app.func,
-    maximize_app.func,
-    type_text.func,
-    press_hotkey.func,
-    validate_user.func,
-])
-
-# Example invoke (your model might expect message objects; adjust if needed)
-result = llm.invoke("Open notepad, maximize it and type write a code to add two numbers.")
-
-# Robust printing of tool calls (different versions may return different types)
-if hasattr(result, "tool_calls") and result.tool_calls:
-    print("Tool calls:", result.tool_calls)
-else:
-    # Fall back to printing the raw result
-    print("Result:", result)
-
+# map of tool names -> callables (these .func attributes are available when using @tool)
 TOOL_REGISTRY = {
-    "open_app": open_app.func,
-    "maximize_app": maximize_app.func,
-    "type_text": type_text.func,
-    "press_hotkey": press_hotkey.func,
-    "validate_user": validate_user.func,
+    "open_app": open_app.func if hasattr(open_app, "func") else open_app,
+    "maximize_app": maximize_app.func if hasattr(maximize_app, "func") else maximize_app,
+    "type_text": type_text.func if hasattr(type_text, "func") else type_text,
+    "press_hotkey": press_hotkey.func if hasattr(press_hotkey, "func") else press_hotkey,
+    "validate_user": validate_user.func if hasattr(validate_user, "func") else validate_user,
 }
 
-if isinstance(result, AIMessage) and result.tool_calls:
-    for call in result.tool_calls:
-        tool_name = call["name"]
-        tool_args = call["args"]
+# -------------------------
+# Primary function to call from outside
+# -------------------------
+def run_task(
+    prompt: str,
+    *,
+    model: str = "qwen3:4b",
+    base_url: str = "http://127.0.0.1:11434",
+    temperature: float = 0.0,
+    timeout_seconds: Optional[int] = 30,
+) -> Dict[str, Any]:
+    """
+    Run a prompt through ChatOllama bound to local tools and execute any tool calls returned.
 
-        print(f"\n→ Executing tool: {tool_name}")
-        print(f"  Args: {tool_args}")
+    Returns a dict:
+    {
+      "llm_response": "<text or representation of model result>",
+      "tool_calls": [ { "name": str, "args": dict, "output": any, "error": optional_str }, ... ],
+      "success": True/False,
+      "raw_result": <raw model return value>
+    }
 
-        tool_fn = TOOL_REGISTRY.get(tool_name)
+    Notes:
+     - This will attempt to execute any tools the model requests. Be careful running arbitrary prompts.
+     - Ensure ChatOllama server is running at base_url and the requested model is available.
+    """
+    # create/initialize the LLM and bind tools
+    try:
+        llm = ChatOllama(
+            model=model,
+            base_url=base_url,
+            validate_model_on_init=True,
+            temperature=temperature,
+        ).bind_tools([
+            TOOL_REGISTRY["open_app"],
+            TOOL_REGISTRY["maximize_app"],
+            TOOL_REGISTRY["type_text"],
+            TOOL_REGISTRY["press_hotkey"],
+            TOOL_REGISTRY["validate_user"],
+        ])
+    except Exception as e:
+        return {
+            "llm_response": None,
+            "tool_calls": [],
+            "success": False,
+            "error": f"Failed to initialize ChatOllama or bind tools: {e}",
+            "raw_result": None
+        }
 
-        if not tool_fn:
-            print(f"  ❌ Tool '{tool_name}' not found")
-            continue
+    # invoke the model
+    try:
+        result = llm.invoke(prompt)
+    except Exception as e:
+        return {
+            "llm_response": None,
+            "tool_calls": [],
+            "success": False,
+            "error": f"LLM invoke failed: {e}",
+            "raw_result": None
+        }
 
+    # helper to safely extract textual LLM response
+    def extract_text(r):
         try:
-            output = tool_fn(**tool_args)
-            print(f"  ✅ Output: {output}")
+            if hasattr(r, "content"):
+                return getattr(r, "content")
+            if isinstance(r, dict):
+                # common shape: {'content': '...'} or {'text': '...'}
+                return r.get("content") or r.get("text") or str(r)
+            return str(r)
+        except Exception:
+            return str(r)
+
+    llm_text = extract_text(result)
+
+    # parse tool calls in a few common formats and execute them
+    tool_calls_list = []
+
+    # Try multiple strategies to find tool calls
+    potential_tool_calls = None
+    if hasattr(result, "tool_calls") and getattr(result, "tool_calls"):
+        potential_tool_calls = getattr(result, "tool_calls")
+    elif isinstance(result, dict) and "tool_calls" in result:
+        potential_tool_calls = result["tool_calls"]
+    elif isinstance(result, dict) and "tool_calls" in result.get("metadata", {}):
+        potential_tool_calls = result["metadata"]["tool_calls"]
+    else:
+        # if result is an AIMessage with content that looks like a JSON list of calls, user may parse externally
+        potential_tool_calls = None
+
+    if not potential_tool_calls:
+        # nothing to execute
+        return {
+            "llm_response": llm_text,
+            "tool_calls": [],
+            "success": True,
+            "raw_result": result,
+        }
+
+    # Execute each call sequentially
+    for call in potential_tool_calls:
+        # normalize shape
+        try:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            args = call.get("args") if isinstance(call, dict) else getattr(call, "args", {})
+            if args is None:
+                args = {}
+
+            entry = {"name": name, "args": args, "output": None, "error": None}
+            fn = TOOL_REGISTRY.get(name)
+            if not fn:
+                entry["error"] = f"Tool '{name}' not found in TOOL_REGISTRY"
+                tool_calls_list.append(entry)
+                continue
+
+            try:
+                output = fn(**args)
+                entry["output"] = output
+            except Exception as e:
+                entry["error"] = f"Tool execution raised exception: {e}"
         except Exception as e:
-            print(f"  ❌ Tool execution failed: {e}")
+            entry = {"name": None, "args": None, "output": None, "error": f"Failed to parse tool call: {e}"}
+
+        tool_calls_list.append(entry)
+
+    return {
+        "llm_response": llm_text,
+        "tool_calls": tool_calls_list,
+        "success": True,
+        "raw_result": result,
+    }
+
+if __name__ == "__main__":
+    demo_prompt = 'Open notepad and type "hello buddy".'
+    print("Running demo prompt:", demo_prompt)
+    out = run_task(demo_prompt)
+    import json
+    print(json.dumps({
+        "llm_response": out.get("llm_response"),
+        "tool_calls": out.get("tool_calls"),
+        "success": out.get("success"),
+        "error": out.get("error", None)
+    }, indent=2, default=str))
